@@ -1,123 +1,161 @@
-name: Sparta Arena 3D Windows Build
+name: Sparta Arena Windows Build
 
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches:
+      - main
 
 permissions:
   contents: read
 
 jobs:
-  build:
+  windows-build:
     runs-on: windows-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
 
     steps:
       - name: Depoyu indir
         uses: actions/checkout@v4
 
-      - name: Python 3.11 kur
+      - name: Python kur
         uses: actions/setup-python@v5
         with:
-          python-version: '3.11'
+          python-version: "3.11"
 
-      - name: Kaynak ZIP dosyasını aç ve yolu doğrula
+      - name: ZIP dosyasini bul ve ac
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
-          $zip = Join-Path $env:GITHUB_WORKSPACE 'SpartaArena_3D_PC_Kaynak.zip'
-          if (!(Test-Path $zip)) {
-            throw 'SpartaArena_3D_PC_Kaynak.zip bulunamadı. Kaynak paketini deponun ana dizinine yükleyip Commit changes yap.'
+          $ErrorActionPreference = "Stop"
+
+          $zip = Get-ChildItem `
+            -Path "$env:GITHUB_WORKSPACE" `
+            -Filter "*.zip" `
+            -File |
+            Select-Object -First 1
+
+          if (-not $zip) {
+            throw "Depoda ZIP dosyasi bulunamadi."
           }
-          $unpack = Join-Path $env:RUNNER_TEMP 'SpartaArenaSource'
-          Remove-Item $unpack -Recurse -Force -ErrorAction SilentlyContinue
-          New-Item -ItemType Directory -Path $unpack -Force | Out-Null
-          Expand-Archive -LiteralPath $zip -DestinationPath $unpack -Force
-          $src = Join-Path $unpack 'SpartaArena_3D_PC'
-          if (!(Test-Path (Join-Path $src 'main.py'))) { throw 'ZIP içinde 3D main.py bulunamadı.' }
-          if (!(Test-Path (Join-Path $src 'legacy_v57/main.py'))) { throw 'V57 tam oyun kodu bulunamadı.' }
-          if (!(Test-Path (Join-Path $src 'requirements-build.txt'))) { throw 'requirements-build.txt bulunamadı.' }
-          "SPARTA_SOURCE_DIR=$src" >> $env:GITHUB_ENV
-          Write-Host "Kaynak yolu: $src"
 
-      - name: Bağımlılıkları kur ve kaynakları kontrol et
+          Write-Host "Bulunan ZIP: $($zip.Name)"
+
+          $gameDir = Join-Path $env:GITHUB_WORKSPACE "game"
+          New-Item -ItemType Directory -Path $gameDir -Force | Out-Null
+
+          Expand-Archive `
+            -LiteralPath $zip.FullName `
+            -DestinationPath $gameDir `
+            -Force
+
+          $main = Get-ChildItem `
+            -Path $gameDir `
+            -Filter "main.py" `
+            -Recurse `
+            -File |
+            Select-Object -First 1
+
+          if (-not $main) {
+            Write-Host "ZIP icindeki dosyalar:"
+            Get-ChildItem $gameDir -Recurse -File |
+              Select-Object -First 100 -ExpandProperty FullName
+            throw "ZIP icinde main.py bulunamadi."
+          }
+
+          $projectDir = $main.DirectoryName
+          Write-Host "Oyun klasoru: $projectDir"
+
+          "PROJECT_DIR=$projectDir" |
+            Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      - name: Python paketlerini kur
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
+          $ErrorActionPreference = "Stop"
+
           python -m pip install --upgrade pip
-          if ($LASTEXITCODE -ne 0) { throw 'pip güncellenemedi.' }
-          python -m pip install -r "$env:SPARTA_SOURCE_DIR\requirements-build.txt"
-          if ($LASTEXITCODE -ne 0) { throw 'Panda3D/Pygame/PyInstaller kurulamadı.' }
-          python -m py_compile "$env:SPARTA_SOURCE_DIR\main.py" "$env:SPARTA_SOURCE_DIR\legacy_v57\main.py"
-          if ($LASTEXITCODE -ne 0) { throw 'Python kaynak kodu kontrolünden geçemedi.' }
+          python -m pip install pygame ursina pyinstaller
 
-      - name: Gerçek 3D PC EXE oluştur
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          $src = $env:SPARTA_SOURCE_DIR
-          $dist = Join-Path $env:GITHUB_WORKSPACE 'dist'
-          New-Item -ItemType Directory -Path $dist -Force | Out-Null
-          Push-Location $src
-          try {
-            python -m PyInstaller `
-              --noconfirm --clean --onefile --windowed `
-              --name SpartaArena `
-              --collect-all panda3d --collect-all direct `
-              --add-data "$src\assets;assets" `
-              --icon (Join-Path $src 'assets\SpartaArena.ico') `
-              --distpath $dist `
-              --workpath (Join-Path $env:RUNNER_TEMP 'build-panda') `
-              --specpath (Join-Path $env:RUNNER_TEMP 'spec-panda') `
-              main.py 2>&1 | Tee-Object -FilePath (Join-Path $env:GITHUB_WORKSPACE 'build-3d.log')
-            if ($LASTEXITCODE -ne 0) { throw '3D EXE derlemesi başarısız.' }
-          } finally {
-            Pop-Location
+          $requirements = Join-Path $env:PROJECT_DIR "requirements.txt"
+
+          if (Test-Path $requirements) {
+            python -m pip install -r $requirements
+            if ($LASTEXITCODE -ne 0) {
+              throw "requirements.txt paketleri kurulamadi."
+            }
           }
-          if (!(Test-Path (Join-Path $dist 'SpartaArena.exe'))) { throw 'SpartaArena.exe oluşmadı.' }
 
-      - name: V57 tam içerik EXE oluştur
+      - name: Windows EXE dosyasini derle
         shell: pwsh
         run: |
-          $ErrorActionPreference = 'Stop'
-          $src = $env:SPARTA_SOURCE_DIR
-          $dist = Join-Path $env:GITHUB_WORKSPACE 'dist'
-          Push-Location $src
-          try {
-            python -m PyInstaller `
-              --noconfirm --clean --onefile --windowed `
-              --name SpartaArenaV57 `
-              --collect-all pygame `
-              --add-data "$src\legacy_v57\assets;assets" `
-              --icon (Join-Path $src 'legacy_v57\assets\SpartaArena.ico') `
-              --distpath $dist `
-              --workpath (Join-Path $env:RUNNER_TEMP 'build-pygame') `
-              --specpath (Join-Path $env:RUNNER_TEMP 'spec-v57') `
-              (Join-Path $src 'legacy_v57\main.py') 2>&1 | Tee-Object -FilePath (Join-Path $env:GITHUB_WORKSPACE 'build-v57.log')
-            if ($LASTEXITCODE -ne 0) { throw 'V57 EXE derlemesi başarısız.' }
-          } finally {
-            Pop-Location
+          $ErrorActionPreference = "Stop"
+
+          Set-Location $env:PROJECT_DIR
+
+          $distDir = Join-Path $env:GITHUB_WORKSPACE "dist"
+          $workDir = Join-Path $env:GITHUB_WORKSPACE "build-temp"
+
+          New-Item -ItemType Directory -Path $distDir -Force | Out-Null
+          New-Item -ItemType Directory -Path $workDir -Force | Out-Null
+
+          $pyiArgs = @(
+            "--noconfirm",
+            "--clean",
+            "--windowed",
+            "--onedir",
+            "--name", "SpartaArena",
+            "--distpath", $distDir,
+            "--workpath", $workDir,
+            "--collect-all", "ursina",
+            "--collect-all", "panda3d"
+          )
+
+          Get-ChildItem -Path $env:PROJECT_DIR -Directory |
+            Where-Object {
+              $_.Name -notin @(
+                ".git", ".github", "__pycache__",
+                "build", "dist", ".venv", "venv"
+              )
+            } |
+            ForEach-Object {
+              $pyiArgs += @(
+                "--add-data",
+                "$($_.FullName);$($_.Name)"
+              )
+            }
+
+          Get-ChildItem -Path $env:PROJECT_DIR -File |
+            Where-Object {
+              $_.Extension -notin @(".py", ".pyc", ".spec") -and
+              $_.Name -ne "requirements.txt"
+            } |
+            ForEach-Object {
+              $pyiArgs += @(
+                "--add-data",
+                "$($_.FullName);."
+              )
+            }
+
+          $mainPath = Join-Path $env:PROJECT_DIR "main.py"
+          $pyiArgs += $mainPath
+
+          python -m PyInstaller @pyiArgs
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "Windows derlemesi basarisiz oldu."
           }
-          if (!(Test-Path (Join-Path $dist 'SpartaArenaV57.exe'))) { throw 'SpartaArenaV57.exe oluşmadı.' }
 
-      - name: Windows paketini hazırla
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = 'Stop'
-          Copy-Item (Join-Path $env:SPARTA_SOURCE_DIR 'README_TR.md') 'dist/README_TR.md' -Force
-          Compress-Archive -Path @('dist/SpartaArena.exe','dist/SpartaArenaV57.exe','dist/README_TR.md') `
-            -DestinationPath 'SpartaArena-3D-PC.zip' -Force
-          Get-Item 'SpartaArena-3D-PC.zip' | Format-List Name,Length
+          $exe = Join-Path $distDir "SpartaArena\SpartaArena.exe"
 
-      - name: EXE paketini ve derleme günlüklerini kaydet
-        if: always()
+          if (-not (Test-Path $exe)) {
+            throw "Derleme tamamlandi ancak EXE dosyasi bulunamadi."
+          }
+
+          Write-Host "EXE hazir: $exe"
+
+      - name: Windows oyununu cikti olarak yukle
         uses: actions/upload-artifact@v4
         with:
-          name: Sparta-Arena-Windows-3D
-          path: |
-            SpartaArena-3D-PC.zip
-            build-3d.log
-            build-v57.log
-          if-no-files-found: warn
-          retention-days: 14
+          name: Sparta-Arena-Windows
+          path: dist/SpartaArena/
+          if-no-files-found: error
